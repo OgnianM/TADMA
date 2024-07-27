@@ -5,8 +5,6 @@ namespace tadma {
 
 template<int Dim, int Threads=1024, AnyTensor T, AnyTensor RT, typename Reduce> requires(Commutative<Reduce>)
 __global__ void ReduceKernel(T t, RT result, Reduce reduce, auto postprocess) {
-    static_assert(t.Rank <= 3, "Only tensors with rank <= 3 are supported for now");
-
     constexpr auto Size = T::Dim(Dim);
 
     [[assume(Threads < Size ? threadIdx.x < Size : true)]];
@@ -24,18 +22,30 @@ __global__ void ReduceKernel(T t, RT result, Reduce reduce, auto postprocess) {
             return t(i);
         } else if constexpr(T::Rank == 2) {
             if constexpr (Dim == 0) {
-                return t(i, blockIdx.y);
+                return t(i, blockIdx.x);
             } else {
-                return t(blockIdx.y, i);
+                return t(blockIdx.x, i);
+            }
+        } else if constexpr (T::Rank == 3) {
+            if constexpr (Dim == 0) {
+                return t(i, blockIdx.x, blockIdx.y);
+            } else if constexpr (Dim == 1) {
+                return t(blockIdx.x, i, blockIdx.y);
+            } else {
+                return t(blockIdx.x, blockIdx.y, i);
+            }
+        } else if constexpr (T::Rank == 4) {
+            if constexpr (Dim == 0) {
+                return t(i, blockIdx.x, blockIdx.y, blockIdx.z);
+            } else if constexpr (Dim == 1) {
+                return t(blockIdx.x, i, blockIdx.y, blockIdx.z);
+            } else if constexpr (Dim == 2) {
+                return t(blockIdx.x, blockIdx.y, i, blockIdx.z);
+            } else {
+                return t(blockIdx.x, blockIdx.y, blockIdx.z, i);
             }
         } else {
-            if constexpr (Dim == 0) {
-                return t(i, blockIdx.y, blockIdx.z);
-            } else if constexpr (Dim == 1) {
-                return t(blockIdx.y, i, blockIdx.z);
-            } else {
-                return t(blockIdx.y, blockIdx.z, i);
-            }
+            static_assert(false, "Unsupported rank");
         }
     };
     __shared__ ReduceType shared[Threads];
@@ -96,33 +106,28 @@ __global__ void EltwiseCombineVariadicKernel(auto f, AnyTensor auto t0, AnyTenso
 }
 
 
-template<int Dim, AnyTensor T> requires(Dim >= 0 && Dim < T::Rank && T::device == kCUDA)
+template<int Dim, AnyTensor T> requires(Dim >= 0 && Dim < T::Rank  && T::Rank <= 4 && T::device == kCUDA)
 auto ReduceNode(T input, auto f, auto&& postprocess = []__multi__(const auto& x){ return x; }) {
     Tensor<decltype(postprocess(f(typename T::ValueType(), typename T::ValueType()))),
             Allocator<T::device>, typename T::Dims::template Set<Dim, 1>> result;
 
     // TODO: Reshape launch params to better fit input data
-    dim3 grid(1);
+    dim3 grid;
     dim3 block(1024);
 
-    if constexpr (T::Rank == 2) {
-        if constexpr (Dim == 0) {
-            grid.y = T::Dim(1);
-        } else {
-            grid.y = T::Dim(0);
+    int l = 0;
+
+    constexpr_for<0, T::Rank>([&]<int I>() {
+        if constexpr (I != Dim) {
+            switch (l) {
+                case 0: grid.x = T::Dim(I); break;
+                case 1: grid.y = T::Dim(I); break;
+                case 2: grid.z = T::Dim(I); break;
+            }
+            l++;
         }
-    } else if constexpr (T::Rank == 3) {
-        if constexpr(Dim == 0) {
-            grid.y = T::Dim(1);
-            grid.z = T::Dim(2);
-        } else if constexpr(Dim == 1) {
-            grid.y = T::Dim(0);
-            grid.z = T::Dim(2);
-        } else {
-            grid.y = T::Dim(0);
-            grid.z = T::Dim(1);
-        }
-    }
+    });
+
     ReduceKernel<Dim><<<grid, block, 0, stream>>>(input, result, f, postprocess);
     return result;
 }
@@ -133,7 +138,7 @@ auto InplaceNode(AnyTensor auto&& t, auto&& f) {
 }
 
 template<AnyTensor T>
-auto EltwiseNode(T&& t, auto&& f) {
+auto EltwiseNode(T t, auto&& f) {
     Tensor<std::decay_t<decltype(f(typename T::ValueType()))>, typename T::AllocatorType, typename T::Dims, Sequence<>> c;
     EltwiseKernel<<<(t.Size + 255) / 256, 256, 0, stream>>>(t, c, f);
     return c;

@@ -5,97 +5,133 @@
 
 namespace tadma {
 
+
 template<auto alpha_ = 1, auto beta_ = 0, AnyTensor A_, AnyTensor B_, AnyTensor Copt_ = NoTensor>
-requires(SameDevice<A_, B_> && A_::device == kCUDA && SameRank<A_, B_> && A_::Rank >= 2) // TODO: matrix vector and vector matrix support
-auto matmul(const A_& A__, const B_& B__, Copt_&& Copt = NoTensor()) {
-    // A = B...xNxK
-    // B = B...xKxM
-    // C is broadcastable to B...xNxM
-    // Result is B...xNxM
+requires(SameDevice<A_, B_> && A_::device == kCUDA && SameType<A_, B_>)
+auto matmul(const A_& A, const B_& B, Copt_&& C__ = NoTensor()) {
     using T = typename A_::ValueType;
 
-    constexpr auto Rank = A_::Rank;
+    using DimsA = typename A_::Dims;
+    using DimsB = typename B_::Dims;
 
-    constexpr int N = A_::Dim(Rank - 2);
-    constexpr int M = B_::Dim(Rank - 1);
-    constexpr int K = A_::Dim(Rank - 1);
+    using StridesA = typename A_::Strides;
+    using StridesB = typename B_::Strides;
 
-    static_assert(B_::Dim(Rank - 2) == K, "K dimensions must match");
-
-    Tensor<T, Allocator<A_::device>, typename A_::Dims::template First<Rank - 2>::template Append<N>::template Append<M>> result_;
-    auto result = result_.template reshape<-1, N, M>();
-    auto A = A__.template reshape<-1, N, K>();
-    auto B = B__.template reshape<-1, K, M>();
-
-    constexpr int Batch = A.Dim(0);
-    static_assert(Batch == B.Dim(0) && Batch == result.Dim(0), "Batch dimensions must match");
-
-    using R = TYPE(result);
-
-    auto C = [&]() { if constexpr (beta_ == 0) return result; else return Copt.broadcastTo(result); }();
-
-    using C_ = TYPE(C);
-
-    T alpha = alpha_;
-    T beta = beta_;
-
-    auto transa = CUBLAS_OP_N;
-    auto transb = CUBLAS_OP_N;
-
-    int lda = A.Stride(1);
-    int ldb = B.Stride(1);
-    int ldc = C.Stride(1);
-    int ldr = R::Stride(1);
-
-    int64_t stridea = A.Stride(0);
-    int64_t strideb = B.Stride(0);
-    int64_t stridec = C.Stride(0);
-    int64_t strider = R::Stride(0);
-
-    int rowMajor = CUBLASLT_ORDER_ROW;
-
-    cublasLtMatmulDesc_t operationDesc = NULL;
-    cublasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL, resultDesc = NULL;
-
-    // create operation desciriptor; see cublasLtMatmulDescAttributes_t for details about defaults; here we just need to
-    // set the transforms for A and B
-    check_cublas(cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
-    check_cublas(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(transa)));
-    check_cublas(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(transb)));
-
-    // create matrix descriptors, we need to configure batch size and counts in this case
-    check_cublas(cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_32F, transa == CUBLAS_OP_N ? M : K, transa == CUBLAS_OP_N ? K : M, lda));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stridea, sizeof(stridea)));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
-
-    check_cublas(cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_32F, transb == CUBLAS_OP_N ? K : N, transb == CUBLAS_OP_N ? N : K, ldb));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideb, sizeof(strideb)));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
-
-    check_cublas(cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_32F, M, N, ldc));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stridec, sizeof(stridec)));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
-
-    check_cublas(cublasLtMatrixLayoutCreate(&resultDesc, CUDA_R_32F, M, N, ldr));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(resultDesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(resultDesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strider, sizeof(strider)));
-    check_cublas(cublasLtMatrixLayoutSetAttribute(resultDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
+    constexpr auto RankA = DimsA::Size;
+    constexpr auto RankB = DimsB::Size;
 
 
-    check_cublas(cublasLtMatmul(cublasLtHandle, operationDesc, &alpha, A.view, Adesc, B.view, Bdesc, &beta,
-                                C.view, Cdesc, result.view, resultDesc, nullptr, nullptr, 0, stream));
+    if constexpr (RankA == 3 && RankB == 3 && A_::Dim(0) == B_::Dim(0)) { // Base case BxNxK * BxKxM
+        using T = typename A_::ValueType;
+
+        constexpr auto Rank = A_::Rank;
+
+        constexpr int M = A_::Dim(Rank - 2);
+        constexpr int N = B_::Dim(Rank - 1);
+        constexpr int K = A_::Dim(Rank - 1);
+
+        static_assert(B_::Dim(Rank - 2) == K, "K dimensions must match");
+
+        constexpr int Batch = A_::Dim(0);
+
+        Tensor<T, Allocator<kCUDA>, Sequence<Batch, M, N>> result;
+
+        using R = TYPE(result);
+
+        auto C = [&]() { if constexpr (beta_ == 0) return result; else return C__.broadcastTo(result); }();
+
+        using C_ = TYPE(C);
+
+        T alpha = alpha_;
+        T beta = beta_;
+
+        auto transa = CUBLAS_OP_N;
+        auto transb = CUBLAS_OP_N;
+
+        int lda = A_::Stride(1);
+        int ldb = B_::Stride(1);
+        int ldc = C_::Stride(1);
+        int ldr = R::Stride(1);
+
+        int64_t stridea = A_::Stride(0);
+        int64_t strideb = B_::Stride(0);
+        int64_t stridec = C_::Stride(0);
+        int64_t strider = R::Stride(0);
+
+        int rowMajor = CUBLASLT_ORDER_ROW;
+
+        cublasLtMatmulDesc_t operationDesc = NULL;
+        cublasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL, resultDesc = NULL;
+
+        // create operation desciriptor; see cublasLtMatmulDescAttributes_t for details about defaults; here we just need to
+        // set the transforms for A and B
+        check_cublas(cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
+        check_cublas(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(transa)));
+        check_cublas(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(transb)));
+
+        // create matrix descriptors, we need to configure batch size and counts in this case
+        check_cublas(cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_32F, transa == CUBLAS_OP_N ? M : K, transa == CUBLAS_OP_N ? K : M, lda));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stridea, sizeof(stridea)));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
+
+        check_cublas(cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_32F, transb == CUBLAS_OP_N ? K : N, transb == CUBLAS_OP_N ? N : K, ldb));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideb, sizeof(strideb)));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
+
+        check_cublas(cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_32F, M, N, ldc));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stridec, sizeof(stridec)));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
+
+        check_cublas(cublasLtMatrixLayoutCreate(&resultDesc, CUDA_R_32F, M, N, ldr));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(resultDesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(resultDesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strider, sizeof(strider)));
+        check_cublas(cublasLtMatrixLayoutSetAttribute(resultDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
 
 
-    check_cublas(cublasLtMatmulDescDestroy(operationDesc));
-    check_cublas(cublasLtMatrixLayoutDestroy(Adesc));
-    check_cublas(cublasLtMatrixLayoutDestroy(Bdesc));
-    check_cublas(cublasLtMatrixLayoutDestroy(Cdesc));
-    check_cublas(cublasLtMatrixLayoutDestroy(resultDesc));
+        check_cublas(cublasLtMatmul(cublasLtHandle, operationDesc, &alpha, A.view, Adesc, B.view, Bdesc, &beta,
+                                    C.view, Cdesc, result.view, resultDesc, nullptr, nullptr, 0, stream));
 
-    return result_;
+
+        check_cublas(cublasLtMatmulDescDestroy(operationDesc));
+        check_cublas(cublasLtMatrixLayoutDestroy(Adesc));
+        check_cublas(cublasLtMatrixLayoutDestroy(Bdesc));
+        check_cublas(cublasLtMatrixLayoutDestroy(Cdesc));
+        check_cublas(cublasLtMatrixLayoutDestroy(resultDesc));
+
+        return result;
+    } else {
+        // Recursive broadcasting rules
+        if constexpr (RankA == 1) {
+            return matmul(A.template unsqueeze<0>(), B, C__);
+        } else if constexpr (RankB == 1) {
+            return matmul(A, B.template unsqueeze<1>(), C__);
+        } else if constexpr (RankA == 2) {
+            return matmul(A.template unsqueeze<0>(), B, C__);
+        } else if constexpr (RankB == 2) {
+            return matmul(A, B.template unsqueeze<0>(), C__);
+        } else if constexpr (RankA == 3 && RankB == 3 && A_::Dim(0) != B_::Dim(0)) {
+            if constexpr (A_::Dim(0) == 1) {
+                return matmul(A.template broadcast<0, B_::Dim(0)>(), B, C__);
+            } else if constexpr (B_::Dim(0) == 1) {
+                return matmul(A, B.template broadcast<0, A_::Dim(0)>(), C__);
+            } else {
+                static_assert(false, "Batch dimensions must be broadcastable");
+            }
+        } else if constexpr (RankA >= 4) {
+            return matmul(A.template reshape<-1, DimsA::Values(RankA - 2), DimsA::Values(RankA - 1)>(), B, C__)
+                    .template reshape<typename DimsA::template Set<RankA - 1, DimsB::Values(RankB - 1)>>();
+        } else if constexpr (RankB >= 4) {
+            return matmul(A, B.template reshape<-1, DimsB::Values(RankB - 2), DimsB::Values(RankB - 1)>(), C__)
+                    .template reshape<typename DimsB::template Set<RankB - 2, DimsA::Values(RankA - 2)>>();
+        }
+
+        else static_assert(false, "Unsupported rank");
+    }
+
+
 }
 
 __multi__ auto tanh(const Scalar auto& x) {
@@ -113,7 +149,7 @@ MKOP(sin, std::sin(x)) MKOP(cos, std::cos(x)) MKOP(tan, std::tan(x))
 MKOP(asin, std::asin(x)) MKOP(acos, std::acos(x)) MKOP(atan, std::atan(x))
 MKOP(asinh, std::asinh(x)) MKOP(acosh, std::acosh(x)) MKOP(atanh, std::atanh(x))
 MKOP(exp, std::exp(x)) MKOP(log, std::log(x)) MKOP(sqrt, std::sqrt(x))
-MKOP(erf, std::erf)
+MKOP(erf, std::erf(x))
 
 // Activation functions
 MKOP(relu, x > 0 ? x : 0)

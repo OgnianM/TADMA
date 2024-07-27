@@ -65,7 +65,6 @@ struct Tensor {
     }
 
     Tensor(std::ifstream& file, unsigned long long offset) : Tensor() {
-        /*
         file.seekg(offset);
 
         if constexpr (device == kCPU) {
@@ -73,10 +72,9 @@ struct Tensor {
         } else {
             auto hostData = new uint8_t[SizeBytes];
             file.read((char*)hostData, SizeBytes);
-            cudaMemcpyAsync(view, hostData, SizeBytes, cudaMemcpyHostToDevice, stream);
+            check_cuda(cudaMemcpyAsync(view, hostData, SizeBytes, cudaMemcpyHostToDevice, stream));
             delete[] hostData;
         }
-        */
     }
 
     __multi__ Tensor(const Tensor& other) noexcept : data(other.data), view(other.view) {}
@@ -124,13 +122,18 @@ struct Tensor {
         return Tensor<T, Allocator, NewDims, NewStrides>(data, view);
     }
 
-    template<int... Dims> requires(IsContiguous && ((Dims * ...) == Size || (Sequence<Dims...>::template IndexOf<-1> != -1)))
+    template<typename NewDims> requires(IsContiguous && (NewDims::Product() == Size || (NewDims::template IndexOf<-1> != -1)))
     __multi__ auto reshape(this auto&& self) {
-        constexpr auto in1 = Sequence<Dims...>::template IndexOf<-1>;
+        constexpr auto in1 = NewDims::template IndexOf<-1>;
         if constexpr (in1 != -1) {
-            return Tensor<T, Allocator, typename Sequence<Dims...>::template Set<in1, -Size / (Dims * ...)>>(self.data, self.view);
-        } else return Tensor<T, Allocator, Sequence<Dims...>>(self.data, self.view);
+            return Tensor<T, Allocator, typename NewDims::template Set<in1, -Size / (NewDims::Product())>>(self.data, self.view);
+        } else return Tensor<T, Allocator, NewDims>(self.data, self.view);
     }
+
+    template<int... Dims>
+    __multi__ auto reshape(this auto&& self) { return self.template reshape<Sequence<Dims...>>(); }
+
+
 
     template<typename Self, typename... Is> requires(sizeof...(Is) <= Rank && sizeof...(Is) > 0)
     __multi__ decltype(auto) operator()(this Self&& self, Is... indices) {
@@ -178,19 +181,19 @@ struct Tensor {
     }
 
     template<int Dim = -1, int Broadcast = 1> requires((Dim >= 0 && Dim <= Rank) || (Dim < 0 && Rank + Dim + 1 <= Rank))
-    constexpr auto unsqueeze() {
+    constexpr auto unsqueeze(this auto&& self) {
         constexpr int DimIndex = Dim < 0 ? Rank + Dim + 1 : Dim;
         if constexpr (DimIndex == Rank) {
-            return Tensor<T, Allocator, typename Dims::template Append<Broadcast>, typename Strides::template Append<0>>(data, view);
+            return Tensor<T, Allocator, typename Dims::template Append<Broadcast>, typename Strides::template Append<0>>(self.data, self.view);
         } else {
             return Tensor<T, Allocator, typename Dims::template Insert<DimIndex, Broadcast>, typename Strides::template Insert<DimIndex, 0>>(
-                    data, view);
+                    self.data, self.view);
         }
     }
 
     template<int Dim, int Size> requires(Dims::Values(Dim) == 1)
-    constexpr auto broadcast() {
-        return Tensor<T, Allocator, typename Dims::template Set<Dim, Size>, typename Strides::template Set<Dim, 0>>(data, view);
+    constexpr auto broadcast(this auto&& self) {
+        return Tensor<T, Allocator, typename Dims::template Set<Dim, Size>, typename Strides::template Set<Dim, 0>>(self.data, self.view);
     }
 
     template<typename U> requires(ContiguousSizeBytes == U::ContiguousSizeBytes)

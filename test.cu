@@ -240,8 +240,6 @@ auto forward(Tensor<int32_t, ALLOCATOR, Sequence<1,512>> input_1) {
     auto _encoder_layer_0_attention_self_Softmax_output_0 = softmax<-1, true>(_encoder_layer_0_attention_self_MatMul_output_0);
     auto _encoder_layer_0_attention_self_MatMul_1_output_0 = matmul<1>(_encoder_layer_0_attention_self_Softmax_output_0, _encoder_layer_0_attention_self_Transpose_1_output_0);
 
-    std::cout << typename_<decltype(_encoder_layer_0_attention_self_MatMul_1_output_0)>() << std::endl;
-    /*
     auto _encoder_layer_0_attention_self_Transpose_3_output_0 = _encoder_layer_0_attention_self_MatMul_1_output_0.transpose<0,2,1,3>();
     auto _encoder_layer_0_attention_self_Reshape_3_output_0 = _encoder_layer_0_attention_self_Transpose_3_output_0.reshape<1,512,768>();
     auto _encoder_layer_0_attention_output_dense_MatMul_output_0 = matmul<1>(_encoder_layer_0_attention_self_Reshape_3_output_0, _encoder_layer_0_attention_output_dense_Transpose_output_0);
@@ -633,12 +631,11 @@ auto forward(Tensor<int32_t, ALLOCATOR, Sequence<1,512>> input_1) {
     auto _encoder_layer_11_output_dense_Add_output_0 = encoder_layer_11_output_dense_bias + _encoder_layer_11_output_dense_MatMul_output_0;
     auto _encoder_layer_11_output_Add_output_0 = _encoder_layer_11_output_dense_Add_output_0 + _encoder_layer_11_attention_output_LayerNorm_LayerNormalization_output_0;
     auto onnx_Gather_1420 = layer_norm<-1>(_encoder_layer_11_output_Add_output_0, encoder_layer_11_output_LayerNorm_weight, encoder_layer_11_output_LayerNorm_bias, 9.999999960041972e-13);
-    auto _pooler_Gather_output_0 = gather(onnx_Gather_1420, _Constant_output_0);
+    auto _pooler_Gather_output_0 = onnx_Gather_1420(0);
     auto _pooler_dense_Gemm_output_0 = matmul<1.0, 1.0>(_pooler_Gather_output_0, pooler_dense_weight, pooler_dense_bias);
     auto _1423 = tanh<true>(_pooler_dense_Gemm_output_0);
     return std::make_tuple(onnx_Gather_1420, _1423);
 
-     */
 }
 };
 

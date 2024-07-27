@@ -74,15 +74,18 @@ int main() {
     T::InitGuard guard;
 
     {
-        T::Tensor<float, T::Allocator<T::kCUDA>, T::Sequence<10, 10>> A_;
-        iota(A_);
 
-        auto C = A_.reduce<1>([]__multi__ (auto x, auto y) {
-            return std::min(x, y);
-        }, []__multi__(auto x){ return x > 50; });
-        std::cout << A_ << '\n';
+        T::Tensor<float, T::Allocator<T::kCUDA>, T::Sequence<1>> t;
+        T::Tensor<float, T::Allocator<T::kCUDA>, T::Sequence<122, 5, 1, 4>> t2;
+        iota(t2, 0);
 
-        std::cout << C;
+        t =1;
+        t2 = 1;
+
+        auto x = matmul(t, t2);
+
+        std::cout << x;
+
     }
     /*
     {
