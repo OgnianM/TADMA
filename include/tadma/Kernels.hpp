@@ -128,7 +128,10 @@ auto ReduceNode(T input, auto f, auto&& postprocess = []__multi__(const auto& x)
         }
     });
 
-    ReduceKernel<Dim><<<grid, block, 0, stream>>>(input, result, f, postprocess);
+    constexpr int Threads = std::min(1024, 1 << (63 - std::countl_zero(uint64_t(T::Dim(Dim)))));
+    block.x = Threads;
+
+    ReduceKernel<Dim, Threads><<<grid, block, 0, stream>>>(input, result, f, postprocess);
     return result;
 }
 
