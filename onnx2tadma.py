@@ -234,11 +234,6 @@ def print_onnx_model_structure(model_path):
         statements.append(f'    return {process_name(model.graph.output[0].name)};\n')
 
     statements.append('}\n};\n\n')
-
-    # Print details about the initializers
-
     output.writelines(statements)
 
-
-# Example usage
 print_onnx_model_structure(input_path)

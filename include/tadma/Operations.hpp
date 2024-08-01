@@ -191,18 +191,10 @@ auto operator*=(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineNod
 auto operator/=(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a / b; }); }
 
 
-template<AnyTensor A, AnyTensor B>
-auto operator+(A& t, const B& t2) {
-    if constexpr (Broadcastable<B, A>) { // Commutative operations can be reversed if broadcasting doesn't work
-        return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a + b; });
-    } else {
-        return CombineToNode(t2, t, [] __multi__ (const auto& a, const auto& b) { return a + b; });
-    }
-}
-
-auto operator-(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a - b; }); }
-auto operator*(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a * b; }); }
-auto operator/(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a / b; }); }
+auto operator+(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a + b; }); }
+auto operator-(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a - b; }); }
+auto operator*(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a * b; }); }
+auto operator/(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a / b; }); }
 
 auto operator>(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a > b; }); }
 auto operator<(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a < b; }); }
@@ -251,7 +243,7 @@ template<int D, bool Inplace = true> decltype(auto) layer_norm(AnyTensor auto&& 
     }
 }
 
-template<AnyTensor Cond, AnyTensor X_, AnyTensor Y_> requires(SameDevice<Cond, X_, Y_>)
+template<AnyTensor Cond, AnyTensor X_, AnyTensor Y_>
 decltype(auto) where(Cond condition, X_ X, Y_ Y) {
     Tensor<std::common_type_t<typename X_::ValueType, typename Y_::ValueType>, typename X_::AllocatorType, typename Cond::Dims> result;
     CombineVariadicNode([]__multi__(auto& r, const auto& c, const auto& x, const auto& y) {
@@ -267,12 +259,10 @@ __global__ void GatherKernel(AnyTensor auto t, AnyTensor auto indices, AnyTensor
     }
 }
 
-template<int Axis=0>
-auto gather(AnyTensor auto t, AnyTensor auto indices) {
-    using NewDims = decltype(constexpr_for<Axis + 1, t.Rank>([&]<int I>(auto dims){
-        return typename decltype(dims):: template Append<t.Dim(I)>();
-    }, typename TYPE(indices)::Dims()));
-    Tensor<typename TYPE(t)::ValueType, typename TYPE(t)::AllocatorType, NewDims> result;
+template<int Axis=0, AnyTensor T1, AnyTensor T2> requires(SameDevice<T1, T2> && SameRank<T1, T2>)
+auto gather(const T1& input, const T2& indices) {
+    Tensor<typename T1::ValueType, typename T1::AllocatorType, typename T2::Dims> result;
+
 
 
     return result;

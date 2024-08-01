@@ -17,8 +17,8 @@ template <typename T> concept AnyTensor = requires(T t) {
     t.data;
 };
 
-template<typename T> concept AnyCudaTensor = AnyTensor<T> && (T::device == Device::kCUDA);
-template<typename T> concept AnyHostTensor = AnyTensor<T> && (T::device == Device::kCPU);
+template<typename T> concept AnyCudaTensor = AnyTensor<T> && (std::decay_t<T>::device == Device::kCUDA);
+template<typename T> concept AnyHostTensor = AnyTensor<T> && (std::decay_t<T>::device == Device::kCPU);
 
 template<typename T> concept AnySequence = requires {
         T::Size;

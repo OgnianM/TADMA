@@ -3,11 +3,9 @@
 
 namespace tadma {
 
-template<int Dim, int Threads=1024, AnyTensor T, AnyTensor RT, typename Reduce> requires(Commutative<Reduce>)
+template<int Dim, int Threads, AnyTensor T, AnyTensor RT, typename Reduce> requires(Commutative<Reduce>)
 __global__ void ReduceKernel(T t, RT result, Reduce reduce, auto postprocess) {
     constexpr auto Size = T::Dim(Dim);
-
-    [[assume(Threads < Size ? threadIdx.x < Size : true)]];
 
     using ValueType = typename T::ValueType;
     using ReduceType = decltype(reduce(ValueType(), ValueType()));
@@ -80,36 +78,11 @@ __global__ void ReduceKernel(T t, RT result, Reduce reduce, auto postprocess) {
     }
 }
 
-__global__ void InplaceKernel(AnyTensor auto t, auto f) {
-    auto i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < t.ContiguousSize) t[i] = f(t[i]);
-}
-
-__global__ void EltwiseKernel(AnyTensor auto in, AnyTensor auto out, auto f) {
-    auto i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < in.ContiguousSize) out[i] = f(in[i]);
-}
-
-__global__ void EltwiseCombineKernel(AnyTensor auto a, AnyTensor auto b, auto f) {
-    auto i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < a.ContiguousSize) a[i] = f(a[i], b[i]);
-}
-
-__global__ void EltwiseCombineToKernel(AnyTensor auto a, AnyTensor auto b, AnyTensor auto c, auto f) {
-    auto i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < a.ContiguousSize) c[i] = f(a[i], b[i]);
-}
-
-__global__ void EltwiseCombineVariadicKernel(auto f, AnyTensor auto t0, AnyTensor auto... sources) {
-    auto i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < t0.Size) f(t0[i], sources[i]...);
-}
-
-
-template<int Dim, AnyTensor T> requires(Dim >= 0 && Dim < T::Rank  && T::Rank <= 4 && T::device == kCUDA)
-auto ReduceNode(T input, auto f, auto&& postprocess = []__multi__(const auto& x){ return x; }) {
+template<int Dim, AnyTensor T>
+requires(Dim >= 0 && Dim < T::Rank  && T::Rank <= 4 && T::device == kCUDA)
+auto ReduceNode(const T& x, auto&& f, auto&& postprocess) {
     Tensor<decltype(postprocess(f(typename T::ValueType(), typename T::ValueType()))),
-            Allocator<T::device>, typename T::Dims::template Set<Dim, 1>> result;
+           Allocator<T::device>, typename T::Dims::template Set<Dim, 1>> result;
 
     // TODO: Reshape launch params to better fit input data
     dim3 grid;
@@ -131,55 +104,71 @@ auto ReduceNode(T input, auto f, auto&& postprocess = []__multi__(const auto& x)
     constexpr int Threads = std::min(1024, 1 << (63 - std::countl_zero(uint64_t(T::Dim(Dim)))));
     block.x = Threads;
 
-    ReduceKernel<Dim, Threads><<<grid, block, 0, stream>>>(input, result, f, postprocess);
+    ReduceKernel<Dim, Threads><<<grid, block, 0, stream>>>(x, result, f, postprocess);
     return result;
 }
 
+__global__ void EltwiseCombineVariadicKernel(auto f, AnyTensor auto x, AnyTensor auto... ys)
+requires(SameDims<TYPE(x), TYPE(ys)> && ...) {
+    auto i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < x.Size) f(x[i], ys[i]...);
+}
+
+template<AnyCudaTensor T1, AnyCudaTensor... Ts>
+void CombineVariadicNode(auto&& f, T1&& t0, Ts&&... tensors) {
+    EltwiseCombineVariadicKernel<<<(t0.Size + 255) / 256, 256, 0, stream>>>(f, t0, tensors.broadcastTo(t0)...);
+}
+
+template<AnyHostTensor T1, AnyHostTensor... Ts>
+void CombineVariadicNode(auto&& f, T1&& t0, Ts&&... tensors) {
+    [&](auto&&... ts) {
+        #pragma omp parallel for
+        for (size_t i = 0; i < t0.Size; i++) {
+            f(ts[i]...);
+        }
+    }(t0, tensors.broadcastTo(t0)...);
+}
+
+
 auto InplaceNode(AnyTensor auto&& t, auto&& f) {
-    InplaceKernel<<<(t.Size + 255) / 256, 256, 0, stream>>>(t.removeFakeDims(), f);
+    CombineVariadicNode([f]__multi__(auto& x) {x = f(x);}, t.removeFakeDims());
     return t;
 }
 
 template<AnyTensor T>
-auto EltwiseNode(T t, auto&& f) {
-    Tensor<std::decay_t<decltype(f(typename T::ValueType()))>, typename T::AllocatorType, typename T::Dims, Sequence<>> c;
-    EltwiseKernel<<<(t.Size + 255) / 256, 256, 0, stream>>>(t, c, f);
-    return c;
-};
+auto EltwiseNode(const T& x, auto&& f) {
+    Tensor<std::decay_t<decltype(f(typename T::ValueType()))>, typename T::AllocatorType, typename T::Dims, Sequence<>> y;
+    CombineVariadicNode([f]__multi__(const auto& x, auto& y) {
+        y = f(x);
+    }, x, y);
+    return y;
+}
 
 template<typename F, AnyTensor T1, AnyTensor T2>
-auto CombineNode(T1& t, T2& other, const F& f) {
-    EltwiseCombineKernel<<<(T1::Size + 255) / 256, 256, 0, stream>>>(t, other.broadcastTo(t), f);
-    return t;
+auto CombineNode(T1& x, const T2& y, const F& f) {
+    CombineVariadicNode([f]__multi__(auto& x, const auto& y) { x = f(x, y); }, x, y);
+    return x;
 }
 
 template<AnyTensor T1, AnyTensor T2, typename F>
-auto CombineToNode(T1& a, T2& b, const F& f) {
-    using ReturnType = std::decay_t<decltype(f(typename T1::ValueType(), typename T2::ValueType()))>;
-    Tensor<ReturnType, typename T1::AllocatorType, typename T1::Dims> c;
-    EltwiseCombineToKernel<<<(T1::Size + 255) / 256, 256, 0, stream>>>(a, b.broadcastTo(c), c, f);
-    return c;
-}
-
-template<AnyTensor T1, AnyTensor... Ts>
-void CombineVariadicNode(auto&& f, T1&& t0, Ts&&... tensors) requires(SameDevice<T1, Ts...>) {
-    auto x = std::tuple {t0, tensors.broadcastTo(t0)...};
-    EltwiseCombineVariadicKernel<<<(t0.Size + 255) / 256, 256, 0, stream>>>(f, t0, tensors.broadcastTo(t0)...);
-}
-
-template<bool Inplace> auto MakeEltwiseNode(AnyTensor auto&& t, auto f) {
-    if constexpr (Inplace) {
-        return InplaceNode(t, f);
+auto CombineToNode(const T1& x, const T2& y, const F& f) {
+    if constexpr (!Broadcastable<T2, T1> && Broadcastable<T1, T2> && Commutative<F>) { // Commutative operations may be inverted
+        return CombineToNode(y, x, f);
     } else {
-        return EltwiseNode(t, f);
+        using ReturnType = std::decay_t<decltype(f(typename T1::ValueType(), typename T2::ValueType()))>;
+        Tensor<ReturnType, typename T1::AllocatorType, typename T1::Dims> z;
+        CombineVariadicNode([f]__multi__(const auto& x, const auto& y, auto& z) {
+            z = f(x, y);
+        }, x, y.broadcastTo(z), z);
+        return z;
     }
 }
 
-template<bool Inplace> auto MakeEltwiseCombineNode(AnyTensor auto t, AnyTensor auto t2, auto f) {
+template<bool Inplace> auto MakeEltwiseNode(AnyTensor auto&& x, auto&& f) {
     if constexpr (Inplace) {
-        return CombineNode(t, f);
+        return InplaceNode(x, f);
     } else {
-        return CombineToNode(t, f);
+        return EltwiseNode(x, f);
     }
 }
 

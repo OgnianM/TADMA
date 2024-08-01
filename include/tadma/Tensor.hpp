@@ -42,6 +42,9 @@ struct Tensor {
     static constexpr int ContiguousSizeBytes = sizeof(T) * ContiguousSize;
     static constexpr bool IsContiguous = ContiguousSize == Size;
 
+    // Not sliced and not transposed
+    static constexpr bool NormalStrides = Strides() != DefaultStrides();
+
     static constexpr int HasBroadcastDims = constexpr_for<0, Dims::Size>([]<int I>(bool result) {return result || (Strides::Values(I) == 0 && Dims::Values(I) != 1); }, false);
 
 
@@ -122,21 +125,27 @@ struct Tensor {
         return Tensor<T, Allocator, NewDims, NewStrides>(data, view);
     }
 
-    template<typename NewDims> requires(IsContiguous && (NewDims::Product() == Size || (NewDims::template IndexOf<-1> != -1)))
+    template<typename NewDims> requires(NewDims::Product() == Size || (NewDims::template IndexOf<-1> != -1))
     __multi__ auto reshape(this auto&& self) {
-        constexpr auto in1 = NewDims::template IndexOf<-1>;
-        if constexpr (in1 != -1) {
-            return Tensor<T, Allocator, typename NewDims::template Set<in1, -Size / (NewDims::Product())>>(self.data, self.view);
-        } else return Tensor<T, Allocator, NewDims>(self.data, self.view);
+        auto reshape_impl = [&](auto&& self) {
+            constexpr auto in1 = NewDims::template IndexOf<-1>;
+            if constexpr (in1 != -1) {
+                return Tensor<T, Allocator, typename NewDims::template Set<in1, -Size / (NewDims::Product())>>(self.data, self.view);
+            } else return Tensor<T, Allocator, NewDims>(self.data, self.view);
+        };
+        if constexpr (!NormalStrides) {
+            // Don't know how to easily do this without cloning
+            return reshape_impl(self.clone());
+        } else {
+            return reshape_impl(self);
+        }
     }
 
     template<int... Dims>
     __multi__ auto reshape(this auto&& self) { return self.template reshape<Sequence<Dims...>>(); }
 
-
-
-    template<typename Self, typename... Is> requires(sizeof...(Is) <= Rank && sizeof...(Is) > 0)
-    __multi__ decltype(auto) operator()(this Self&& self, Is... indices) {
+    template<typename... Is> requires(sizeof...(Is) <= Rank && sizeof...(Is) > 0)
+    __multi__ decltype(auto) operator()(this auto&& self, Is... indices) {
         int indicesArray[sizeof...(Is)] = {int (indices)...};
 
         int offset = constexpr_for<0, sizeof...(Is)>([&]<int I>(int offset) {
@@ -150,6 +159,12 @@ struct Tensor {
             return Tensor<T, Allocator, typename Dims::template Last<Rank - sizeof...(Is)>,
                     typename Strides::template Last<Rank - sizeof...(Is)>> (self.data, self.view + offset);
         }
+    }
+
+    template<int Axis> requires(Axis >= 0 && Axis < Rank)
+    __multi__ auto index(int i) {
+        auto offset = i * Strides::Values(Axis);
+        return Tensor<T, Allocator, typename Dims::template Remove<Axis>, typename Strides::template Remove<Axis>>(data, view + offset);
     }
 
     static consteval int Dim(int i) { return Dims::Values(i); }
@@ -196,7 +211,7 @@ struct Tensor {
         return Tensor<T, Allocator, typename Dims::template Set<Dim, Size>, typename Strides::template Set<Dim, 0>>(self.data, self.view);
     }
 
-    template<typename U> requires(ContiguousSizeBytes == U::ContiguousSizeBytes)
+    template<typename U> requires(Dims() == typename U::Dims() && Strides() == typename U::Strides())
     void copyTo(U& other) const {
         if constexpr (device == kCPU && U::device == kCPU) {
             memcpy(other.view, view, ContiguousSizeBytes);
@@ -209,7 +224,7 @@ struct Tensor {
         }
     }
 
-    template<typename U> requires(ContiguousSizeBytes != U::ContiguousSizeBytes && Size == U::Size)
+    template<typename U> requires(Dims() == typename U::Dims() && Strides() != typename U::Strides())
     void copyTo(U& other) const { CombineVariadicNode([] __multi__ (auto& dst, const auto& src) { dst = src; }, other, *this); }
 
     template<typename U> requires(ContiguousSizeBytes == U::ContiguousSizeBytes)

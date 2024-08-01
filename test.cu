@@ -645,5 +645,6 @@ int main() {
     Model mod("../test.bin");
     Tensor<int32_t, ALLOCATOR, Sequence<1,512>> input_1;
 
+    while(true)
     mod.forward(input_1);
 };
