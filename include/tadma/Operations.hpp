@@ -2,12 +2,13 @@
 #include <random>
 #include "Tensor.hpp"
 #include "Kernels.hpp"
+#include <cuda_fp16.h>
 
 namespace tadma {
 
 
 template<auto alpha_ = 1, auto beta_ = 0, AnyTensor A_, AnyTensor B_, AnyTensor Copt_ = NoTensor>
-requires(SameDevice<A_, B_> && A_::device == kCUDA && SameType<A_, B_>)
+requires(SameDevice<A_, B_> && A_::device == kCUDA)
 auto matmul(const A_& A, const B_& B, Copt_&& C__ = NoTensor()) {
     using T = typename A_::ValueType;
 
@@ -42,8 +43,8 @@ auto matmul(const A_& A, const B_& B, Copt_&& C__ = NoTensor()) {
 
         using C_ = TYPE(C);
 
-        T alpha = alpha_;
-        T beta = beta_;
+        float alpha = alpha_;
+        float beta = beta_;
 
         auto transa = CUBLAS_OP_N;
         auto transb = CUBLAS_OP_N;
@@ -63,6 +64,30 @@ auto matmul(const A_& A, const B_& B, Copt_&& C__ = NoTensor()) {
         cublasLtMatmulDesc_t operationDesc = NULL;
         cublasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL, resultDesc = NULL;
 
+        auto get_type = []<typename TT>() -> cudaDataType {
+            using T = typename TT::ValueType;
+            if constexpr (std::is_same_v<T, float>) {
+                return CUDA_R_32F;
+            } else if constexpr (std::is_same_v<T, double>) {
+                return CUDA_R_64F;
+            } else if constexpr (std::is_same_v<T, __half>) {
+                return CUDA_R_16F;
+            } else if constexpr (std::is_same_v<T, int32_t>) {
+                return CUDA_R_32I;
+            } else if constexpr (std::is_same_v<T, int64_t>) {
+                return CUDA_R_64I;
+            } else if constexpr (std::is_same_v<T, uint32_t>) {
+                return CUDA_R_32U;
+            } else if constexpr (std::is_same_v<T, uint64_t>) {
+                return CUDA_R_64U;
+            } else if constexpr (std::is_same_v<T, int8_t>) {
+                return CUDA_R_8I;
+            } else if constexpr (std::is_same_v<T, uint8_t>) {
+                return CUDA_R_8U;
+            }
+            else static_assert(false, "Unsupported type");
+        };
+
         // create operation desciriptor; see cublasLtMatmulDescAttributes_t for details about defaults; here we just need to
         // set the transforms for A and B
         check_cublas(cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
@@ -70,29 +95,29 @@ auto matmul(const A_& A, const B_& B, Copt_&& C__ = NoTensor()) {
         check_cublas(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(transb)));
 
         // create matrix descriptors, we need to configure batch size and counts in this case
-        check_cublas(cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_32F, transa == CUBLAS_OP_N ? M : K, transa == CUBLAS_OP_N ? K : M, lda));
+        check_cublas(cublasLtMatrixLayoutCreate(&Adesc, get_type.template operator()<A_>(), transa == CUBLAS_OP_N ? M : K, transa == CUBLAS_OP_N ? K : M, lda));
         check_cublas(cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
         check_cublas(cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stridea, sizeof(stridea)));
         check_cublas(cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
 
-        check_cublas(cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_32F, transb == CUBLAS_OP_N ? K : N, transb == CUBLAS_OP_N ? N : K, ldb));
+        check_cublas(cublasLtMatrixLayoutCreate(&Bdesc, get_type.template operator()<B_>(), transb == CUBLAS_OP_N ? K : N, transb == CUBLAS_OP_N ? N : K, ldb));
         check_cublas(cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
         check_cublas(cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideb, sizeof(strideb)));
         check_cublas(cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
 
-        check_cublas(cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_32F, M, N, ldc));
+        check_cublas(cublasLtMatrixLayoutCreate(&Cdesc, get_type.template operator()<C_>(), M, N, ldc));
         check_cublas(cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
         check_cublas(cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stridec, sizeof(stridec)));
         check_cublas(cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
 
-        check_cublas(cublasLtMatrixLayoutCreate(&resultDesc, CUDA_R_32F, M, N, ldr));
+        check_cublas(cublasLtMatrixLayoutCreate(&resultDesc, get_type.template operator()<R>(), M, N, ldr));
         check_cublas(cublasLtMatrixLayoutSetAttribute(resultDesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &Batch, sizeof(Batch)));
         check_cublas(cublasLtMatrixLayoutSetAttribute(resultDesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strider, sizeof(strider)));
         check_cublas(cublasLtMatrixLayoutSetAttribute(resultDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajor, sizeof(rowMajor)));
 
 
-        check_cublas(cublasLtMatmul(cublasLtHandle, operationDesc, &alpha, A.view, Adesc, B.view, Bdesc, &beta,
-                                    C.view, Cdesc, result.view, resultDesc, nullptr, nullptr, 0, stream));
+        check_cublas(cublasLtMatmul(cublasLtHandle, operationDesc, &alpha, A.data.view, Adesc, B.data.view, Bdesc, &beta,
+                                    C.data.view, Cdesc, result.data.view, resultDesc, nullptr, nullptr, 0, stream));
 
 
         check_cublas(cublasLtMatmulDescDestroy(operationDesc));
@@ -130,11 +155,9 @@ auto matmul(const A_& A, const B_& B, Copt_&& C__ = NoTensor()) {
 
         else static_assert(false, "Unsupported rank");
     }
-
-
 }
 
-__multi__ auto tanh(const Scalar auto& x) {
+__multi__ constexpr auto tanh(const Scalar auto& x) {
     auto en = exp(-x);
     auto ep = exp(x);
     return (ep - en) / (ep + en);
@@ -156,62 +179,11 @@ MKOP(relu, x > 0 ? x : 0)
 MKOP(sigmoid, 1 / (1 + std::exp(-x)))
 MKOP(tanh, tanh(x))
 MKOP(gelu, 0.5 * x * (1 + tanh(0.7978845608 * (x + 0.044715 * x * x * x))));
-
+MKOP(negate, -x)
 
 #undef MKOP
 
-auto operator+=(AnyTensor auto&& t, const Scalar auto& value) { return InplaceNode(t, [value] __multi__ (const auto& x) { return x + value; }); }
-auto operator-=(AnyTensor auto&& t, const Scalar auto& value) { return InplaceNode(t, [value] __multi__ (const auto& x) { return x - value; }); }
-auto operator*=(AnyTensor auto&& t, const Scalar auto& value) { return InplaceNode(t, [value] __multi__ (const auto& x) { return x * value; }); }
-auto operator/=(AnyTensor auto&& t, const Scalar auto& value) { return InplaceNode(t, [value] __multi__ (const auto& x) { return x / value; }); }
-
-auto operator+(const AnyTensor auto& t, const Scalar auto& value) { return EltwiseNode(t, [value] __multi__ (const auto& x) { return x + value; }); }
-auto operator-(const AnyTensor auto& t, const Scalar auto& value) { return EltwiseNode(t, [value] __multi__ (const auto& x) { return x - value; }); }
-auto operator*(const AnyTensor auto& t, const Scalar auto& value) { return EltwiseNode(t, [value] __multi__ (const auto& x) { return x * value; }); }
-auto operator/(const AnyTensor auto& t, const Scalar auto& value) { return EltwiseNode(t, [value] __multi__ (const auto& x) { return x / value; }); }
-
-auto operator>(const AnyTensor auto& t, const Scalar auto& s) { return EltwiseNode(t, [s] __multi__ (const auto& a) { return a > s; }); }
-auto operator<(const AnyTensor auto& t, const Scalar auto& s) { return EltwiseNode(t, [s] __multi__ (const auto& a) { return a < s; }); }
-auto operator==(const AnyTensor auto& t, const Scalar auto& s) { return EltwiseNode(t, [s] __multi__ (const auto& a) { return a == s; }); }
-auto operator!=(const AnyTensor auto& t, const Scalar auto& s) { return EltwiseNode(t, [s] __multi__ (const auto& a) { return a != s; }); }
-
-auto operator>(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a > b; }); }
-auto operator<(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a < b; }); }
-auto operator==(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a == b; }); }
-auto operator!=(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a != b; }); }
-
-
-auto operator-(const Scalar auto& value, AnyTensor auto& t) { return EltwiseNode(t, [value] __multi__ (const auto& x) { return value - x; }); }
-auto operator/(const Scalar auto& value, AnyTensor auto& t) { return EltwiseNode(t, [value] __multi__ (const auto& x) { return value / x; }); }
-
-
-auto operator+=(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a + b; }); }
-auto operator-=(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a - b; }); }
-auto operator*=(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a * b; }); }
-auto operator/=(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a / b; }); }
-
-
-auto operator+(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a + b; }); }
-auto operator-(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a - b; }); }
-auto operator*(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a * b; }); }
-auto operator/(const AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a / b; }); }
-
-auto operator>(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a > b; }); }
-auto operator<(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a < b; }); }
-auto operator==(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a == b; }); }
-auto operator!=(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a != b; }); }
-
-auto operator&(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a & b; }); }
-auto operator|(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a | b; }); }
-auto operator^(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a ^ b; }); }
-
-auto operator&=(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a & b; }); }
-auto operator|=(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a | b; }); }
-auto operator^=(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a ^ b; }); }
-
-auto operator&&(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a && b; }); }
-auto operator||(AnyTensor auto& t, const AnyTensor auto& t2) { return CombineToNode(t, t2, [] __multi__ (const auto& a, const auto& b) { return a || b; }); }
-
+template<bool Inplace = true> auto pow(AnyTensor auto&& t, const Scalar auto& s) { return MakeEltwiseNode<Inplace>(t, [s] __multi__ (const auto& x) { return std::pow(x, s); }); }
 
 template<int Dim, bool Inplace = true> auto softmax(AnyTensor auto t) { auto e = exp<Inplace>(t); return e /= e.template sum<Dim>(); }
 
@@ -243,8 +215,21 @@ template<int D, bool Inplace = true> decltype(auto) layer_norm(AnyTensor auto&& 
     }
 }
 
+template<int D, bool Inplace = true> auto rms_norm(AnyTensor auto&& t) {
+    auto rms = t.template reduce<D>([]__multi__(const auto& a, const auto& b) { return a + b; }, // Reduction
+                                    []__multi__(const auto& x) { return std::sqrt(x / TYPE(t)::Dim(D)); }, // Postprocess
+                                    []__multi__(const auto& x) { return x * x; } // Preprocess
+                                    );
+    if constexpr (Inplace) {
+        t /= rms;
+        return t;
+    } else {
+        return t / rms;
+    }
+}
+
 template<AnyTensor Cond, AnyTensor X_, AnyTensor Y_>
-decltype(auto) where(Cond condition, X_ X, Y_ Y) {
+auto where(Cond condition, X_ X, Y_ Y) {
     Tensor<std::common_type_t<typename X_::ValueType, typename Y_::ValueType>, typename X_::AllocatorType, typename Cond::Dims> result;
     CombineVariadicNode([]__multi__(auto& r, const auto& c, const auto& x, const auto& y) {
         r = c ? x : y;
@@ -252,21 +237,70 @@ decltype(auto) where(Cond condition, X_ X, Y_ Y) {
     return result;
 }
 
-__global__ void GatherKernel(AnyTensor auto t, AnyTensor auto indices, AnyTensor auto result) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < result.Size) {
-        t[indices[i]].copyTo(result[i]);
-    }
-}
 
+/*
+// torch.gather ??
 template<int Axis=0, AnyTensor T1, AnyTensor T2> requires(SameDevice<T1, T2> && SameRank<T1, T2>)
 auto gather(const T1& input, const T2& indices) {
     Tensor<typename T1::ValueType, typename T1::AllocatorType, typename T2::Dims> result;
 
+    EltwiseVariadicNDNode([]__multi__(auto inputs, auto indices, auto results, auto... is) {
+        constexpr auto Rank = TYPE(input)::Rank;
+        auto index = indices(is...);
+        auto& result = results(is...);
 
+        parameter_pack_replace<Axis>(index, [&]__multi__(auto... is2) {
+            result = inputs(is2...);
+        }, is...);
+    }, input, indices, result);
 
     return result;
 }
+*/
+
+template<int Axis=0>
+auto gather(AnyTensor auto t, AnyTensor auto indices) {
+    using NewDims = decltype(constexpr_for<Axis + 1, t.Rank>([&]<int I>(auto dims){
+        return typename decltype(dims):: template Append<t.Dim(I)>();
+    }, typename TYPE(indices)::Dims()));
+    Tensor<typename TYPE(t)::ValueType, typename TYPE(t)::AllocatorType, NewDims> result;
+
+    EltwiseVariadicNDNode([]__multi__(auto idx, auto result, auto indices, auto t) {
+
+    }, result, indices, t);
+    return result;
+}
+
+
+template<int Axis=0>
+constexpr auto gather(const AnyTensor auto& input, int64_t index) {
+    return input.template index<Axis>(index);
+}
+
+
+template<int Axis = 0, AnyTensor T, AnyTensor... Ts> requires(SameRank<T, Ts...> && Axis < T::Rank &&
+    ((typename T::Dims::template Set<Axis, 0>() == typename Ts::Dims::template Set<Axis, 0>()) && ...))
+auto concat(const T& input0, const Ts&... inputs) {
+    constexpr auto NewSize = Sequence<T::Dim(Axis), Ts::Dim(Axis)...>::Sum();
+    Tensor<typename T::ValueType, typename T::AllocatorType, typename T::Dims::template Set<Axis, NewSize>> result;
+
+    EltwiseVariadicNDNode([]__multi__(auto&& indices, auto&& result, auto&&... inputs) {
+        auto& r = result(indices);
+        auto axis_index = indices[Axis];
+
+        constexpr_for<0, sizeof...(inputs)>([&]<int I>(int64_t accumulator) {
+            constexpr auto Dim = TYPE(std::get<I>(inputs...))::Dim(Axis);
+
+            if (axis_index >= accumulator && accumulator + Dim > axis_index) {
+                indices[Axis] = axis_index - accumulator;
+                r = std::get<I>(inputs...)(indices);
+            }
+            return accumulator + Dim;
+        }, 0);
+    }, result, input0, inputs...);
+    return result;
+}
+
 
 template<AnyTensor T> requires (T::device == kCPU)
 void randn(T& t, const float& mean = 0, const float& stddev = 1) {
@@ -277,9 +311,9 @@ void randn(T& t, const float& mean = 0, const float& stddev = 1) {
     }
 }
 
-template<AnyTensor T> requires (T::device == kCUDA)
-void iota(T& t, const int& start = 0) {
-    InplaceNode(t, [start] __multi__ (const auto& x) { return blockIdx.x * gridDim.x + threadIdx.x + start; });
+template<AnyTensor T>
+void iota(T& t, int start = 0) {
+    InplaceNode(t, [start, view = t.data.view] __multi__ (const auto& x) { return int(&x - view) + start; });
 }
 
 };

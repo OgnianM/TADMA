@@ -1,20 +1,24 @@
 #pragma once
+#include "Meta.hpp"
 
 namespace tadma {
 
 template<auto... Is>
 struct Sequence {
     static constexpr auto Size = sizeof...(Is);
-    static consteval auto Product() requires(Size > 0) {
-        return (Is * ...);
-    }
+    static consteval auto Product() requires(Size > 0) { return (Is * ...); }
+    static consteval auto Sum() requires(Size > 0) { return (Is + ...); }
 
     template<auto X> using Append = Sequence<Is..., X>;
     template<auto X> using Prepend = Sequence<X, Is...>;
 
+    template<typename T>
+    consteval operator T() const requires(Size == 1) {
+        return Values(0);
+    }
 
-    static constexpr void Apply(auto&& f) {
-        f.template operator()<Is...>();
+    static constexpr decltype(auto) Apply(auto&& f) {
+        return f.template operator()<Is...>();
     }
 
     static constexpr auto Tuple() {
@@ -22,13 +26,21 @@ struct Sequence {
         return tuple;
     }
 
-    template<int I> static consteval auto Values() {
-        return std::get<I>(Tuple());
+    template<typename Type>
+    static consteval auto Array() {
+        return std::array<Type, Size>{Is...};
     }
 
-    static consteval auto Values(int I) requires (HaveCommonType<Is...>) {
-        constexpr std::array<std::common_type_t<decltype(Is)...>, Size> arr{Is...};
-        return arr[I];
+    static consteval auto Array() {
+        return std::array<std::common_type_t<decltype(Is)...>, Size>{Is...};
+    }
+
+    template<int I> static consteval auto Values() {
+        return std::get<I < 0 ? Size + I : I>(Tuple());
+    }
+
+    static consteval auto Values(int64_t I) requires (HaveCommonType<Is...>) {
+        return Array()[I];
     }
 
     template<int A, int B, int I = 0, typename State = Sequence<>>
@@ -127,10 +139,17 @@ public:
     template<int I, auto V> using Insert = decltype(InsertImpl<I, V>());
     template<int I, auto V> using Set = decltype(SetImpl<I, V>());
 
-    consteval bool operator==(const Sequence& other) const { return true; }
 
-    template<typename U> requires (!std::is_same_v<U, Sequence>)
-    consteval bool operator==(const U& other) const { return false; }
+   	template<typename Other>
+    consteval bool operator==(const Other& other) const {
+        if constexpr (Size != Other::Size) {
+            return false;
+        } else {
+            return constexpr_for<0, Size>([&]<int I>(bool x) {
+                return x && Values(I) == Other::Values(I);
+            }, true);
+        }
+    }
 
     template<auto X> static constexpr int IndexOf = constexpr_for<0, Size>([]<int I>(auto x) {
         if constexpr (Values<I>() == X) {
@@ -145,13 +164,80 @@ public:
     template<typename U> static consteval bool ContainsOrderedSubset() {
         return ContainsOrderedSubsetImpl<U>();
     }
+
+    static constexpr bool IsSorted = constexpr_for<0, Size - 1>([]<int I>(bool x) {
+        return x && Values<I>() <= Values<I + 1>();
+    }, true);
 };
+
+
+template<AnySequence S> using Sort = decltype([]<AnySequence Seq = S>(this auto&& self) {
+   using Sorted = decltype(constexpr_for<0, Seq::Size - 1>([]<int I>(auto seq) {
+       using T = decltype(seq);
+       if constexpr (T::Values(I) > T::Values(I + 1)) {
+           return typename T::template Swap<I, I + 1>();
+       } else {
+           return T();
+      }
+   }, Seq()));
+   if constexpr (!Sorted::IsSorted) {
+       return self.template operator()<Sorted>();
+   } else {
+       return Sorted();
+   }
+}());
 
 static_assert(Sequence<5, 10, 11>::ContainsOrderedSubset<Sequence<5, 11>>(), "Sanity check failed");
 
-template<int... Is>
-std::ostream& operator<<(std::ostream& os, Sequence<Is...>) {
+template<auto... Is> std::ostream& operator<<(std::ostream& os, Sequence<Is...>) {
     return ((os << Is << ", "), ...);
 }
+
+#define OPERATOR(op) \
+template<AnySequence S0, AnySequence S1> requires(S0::Size == S1::Size)\
+consteval auto operator op(S0, S1) {\
+    return constexpr_for<0, S0::Size>([]<int I>(auto seq) {\
+        return typename TYPE(seq)::template Append<S0::Values(I) op S1::Values(I)>();\
+    }, Sequence<>());\
+}\
+template<AnySequence S0, AnySequence S1> requires(S1::Size == 1)\
+consteval auto operator op(S0, S1) {\
+    return constexpr_for<0, S0::Size>([&]<int I>(auto seq) {\
+        return typename TYPE(seq)::template Append<S0::Values(I) op S1::Values(0)>();\
+    }, Sequence<>());\
+}
+
+OPERATOR(+) OPERATOR(-) OPERATOR(*) OPERATOR(/) OPERATOR(%) OPERATOR(&) OPERATOR(|) OPERATOR(^) OPERATOR(!=)
+#undef OPERATOR
+
+template<AnySequence S0, AnySequence S1> requires(S0::Size == S1::Size)
+consteval auto Equal(S0, S1) {
+    return constexpr_for<0, S0::Size>([]<int I>(auto seq) {
+        return typename TYPE(seq)::template Append<S0::Values(I) == S1::Values(I)>();
+    }, Sequence<>());
+}
+template<AnySequence S0, AnySequence S1> requires(S1::Size == 1)
+consteval auto Equal(S0, S1) {
+    return constexpr_for<0, S0::Size>([&]<int I>(auto seq) {
+        return typename TYPE(seq)::template Append<S0::Values(I) == S1::Values(0)>();
+    }, Sequence<>());
+}
+
+template<AnySequence Cond, AnySequence X, AnySequence Y> requires(Cond::Size == X::Size && X::Size == Y::Size)
+consteval auto where(Cond, X, Y) {
+    return constexpr_for<0, Cond::Size>([&]<int I>(auto seq) {
+        return typename TYPE(seq)::template Append<Cond::Values(I) ? X::Values(I) : Y::Values(I)>();
+    }, Sequence<>());
+}
+
+template<int Axis = 0, AnySequence... S> requires(Axis == 0)
+auto concat(S... s) {
+
+    return constexpr_for<0, sizeof...(S)>([]<int I>(auto seq) {
+        return typename TYPE(seq)::template Merge<TYPE(std::get<I>(std::make_tuple(s...)))>();
+    }, Sequence<>());
+
+}
+
 
 };

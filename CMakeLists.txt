@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.26)
+cmake_minimum_required(VERSION 3.25)
 
 set(CMAKE_CXX_STANDARD 23)
 
@@ -20,20 +20,8 @@ add_executable(TADMA main.cu
         include/tadma/Operations.hpp
         include/tadma/Globals.hpp
         include/tadma/Defines.hpp
-)
-
-add_executable(test test.cu)
-
-
-target_link_libraries(test
-        PRIVATE
-        cublasLt
-        curand
-)
-
-set_target_properties(test PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        CUDA_STANDARD 23
+        include/tadma/Types.hpp
+        include/tadma/Python.hpp
 )
 
 set_target_properties(TADMA PROPERTIES
@@ -52,6 +40,7 @@ else ()
         message("Index only")
 endif ()
 
+
 add_executable(index
         include/tadma/Tadma.hpp
         include/tadma/Sequence.hpp
@@ -63,7 +52,17 @@ add_executable(index
         include/tadma/Operations.hpp
         include/tadma/Globals.hpp
         include/tadma/Defines.hpp
-        main.cpp)
+        main.cpp
+        include/tadma/Types.hpp
+        include/tadma/Python.hpp)
+
 set_target_properties(index PROPERTIES
         CXX_STANDARD 23
 )
+
+
+add_executable(generated scripts/generated.cu)
+
+target_include_directories(generated PRIVATE include)
+
+target_link_libraries(generated cublasLt)
