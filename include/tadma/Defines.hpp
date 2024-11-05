@@ -5,7 +5,11 @@
 #define __multi__
 #endif
 
-// #define __multi__ __host__ __device__
+#ifdef ENABLE_ASSERTS
+#define ASSERT assert
+#else
+#define ASSERT(...)
+#endif
 
 #define check_cuda(expr) { \
     cudaError_t status = expr; \
@@ -13,7 +17,6 @@
         throw std::runtime_error(cudaGetErrorString(status)); \
     } \
 }
-
 
 #define check_cublas(expr) { \
     cublasStatus_t status = expr; \

@@ -6,7 +6,7 @@ namespace tadma {
 template<auto... Is>
 struct Sequence {
     static constexpr auto Size = sizeof...(Is);
-    static consteval auto Product() requires(Size > 0) { return (Is * ...); }
+    static consteval auto Product() { return (1 * ... * Is); }
     static consteval auto Sum() requires(Size > 0) { return (Is + ...); }
 
     template<auto X> using Append = Sequence<Is..., X>;
@@ -39,8 +39,12 @@ struct Sequence {
         return std::get<I < 0 ? Size + I : I>(Tuple());
     }
 
-    static consteval auto Values(int64_t I) requires (HaveCommonType<Is...>) {
-        return Array()[I];
+    static consteval auto Values(int64_t I)  {
+        if constexpr (HaveCommonType<Is...>) {
+            return Array()[I];
+        } else {
+            return 0;
+        }
     }
 
     template<int A, int B, int I = 0, typename State = Sequence<>>
@@ -144,6 +148,8 @@ public:
     consteval bool operator==(const Other& other) const {
         if constexpr (Size != Other::Size) {
             return false;
+        } else if constexpr (Size == 0) {
+            return true;
         } else {
             return constexpr_for<0, Size>([&]<int I>(bool x) {
                 return x && Values(I) == Other::Values(I);
@@ -193,6 +199,7 @@ template<auto... Is> std::ostream& operator<<(std::ostream& os, Sequence<Is...>)
     return ((os << Is << ", "), ...);
 }
 
+/*
 #define OPERATOR(op) \
 template<AnySequence S0, AnySequence S1> requires(S0::Size == S1::Size)\
 consteval auto operator op(S0, S1) {\
@@ -238,6 +245,6 @@ auto concat(S... s) {
     }, Sequence<>());
 
 }
-
+*/
 
 };

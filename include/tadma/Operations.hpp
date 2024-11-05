@@ -183,10 +183,14 @@ MKOP(negate, -x)
 
 #undef MKOP
 
-template<bool Inplace = true> auto pow(AnyTensor auto&& t, const Scalar auto& s) { return MakeEltwiseNode<Inplace>(t, [s] __multi__ (const auto& x) { return std::pow(x, s); }); }
+template<bool Inplace = true> auto pow(AnyTensor auto&& t, const Scalar auto& s) {
+    return MakeEltwiseNode<Inplace>(t, [s] __multi__ (const auto& x) { return std::pow(x, s); });
+}
 
-template<int Dim, bool Inplace = true> auto softmax(AnyTensor auto t) { auto e = exp<Inplace>(t); return e /= e.template sum<Dim>(); }
-
+template<int Dim, bool Inplace = true> auto softmax(AnyTensor auto t) {
+    auto e = exp<Inplace>(t);
+    return e /= e.template sum<Dim>();
+}
 
 template<int D> decltype(auto) mean_stddev(AnyTensor auto&& t) {
     static constexpr auto size = TYPE(t)::Dim(D);
@@ -216,9 +220,9 @@ template<int D, bool Inplace = true> decltype(auto) layer_norm(AnyTensor auto&& 
 }
 
 template<int D, bool Inplace = true> auto rms_norm(AnyTensor auto&& t) {
-    auto rms = t.template reduce<D>([]__multi__(const auto& a, const auto& b) { return a + b; }, // Reduction
-                                    []__multi__(const auto& x) { return std::sqrt(x / TYPE(t)::Dim(D)); }, // Postprocess
-                                    []__multi__(const auto& x) { return x * x; } // Preprocess
+    auto rms = t.template reduce<D>([](const auto& a, const auto& b) { return a + b; }, // Reduction
+                                    [](const auto& x) { return std::sqrt(x / TYPE(t)::Dim(D)); }, // Postprocess
+                                    [](const auto& x) { return x * x; } // Preprocess
                                     );
     if constexpr (Inplace) {
         t /= rms;
@@ -231,74 +235,55 @@ template<int D, bool Inplace = true> auto rms_norm(AnyTensor auto&& t) {
 template<AnyTensor Cond, AnyTensor X_, AnyTensor Y_>
 auto where(Cond condition, X_ X, Y_ Y) {
     Tensor<std::common_type_t<typename X_::ValueType, typename Y_::ValueType>, typename X_::AllocatorType, typename Cond::Dims> result;
-    CombineVariadicNode([]__multi__(auto& r, const auto& c, const auto& x, const auto& y) {
+    CombineVariadicNode([](auto& r, const auto& c, const auto& x, const auto& y) {
         r = c ? x : y;
     }, result, condition, X, Y);
     return result;
 }
 
-
-/*
-// torch.gather ??
-template<int Axis=0, AnyTensor T1, AnyTensor T2> requires(SameDevice<T1, T2> && SameRank<T1, T2>)
-auto gather(const T1& input, const T2& indices) {
-    Tensor<typename T1::ValueType, typename T1::AllocatorType, typename T2::Dims> result;
-
-    EltwiseVariadicNDNode([]__multi__(auto inputs, auto indices, auto results, auto... is) {
-        constexpr auto Rank = TYPE(input)::Rank;
-        auto index = indices(is...);
-        auto& result = results(is...);
-
-        parameter_pack_replace<Axis>(index, [&]__multi__(auto... is2) {
-            result = inputs(is2...);
-        }, is...);
-    }, input, indices, result);
-
-    return result;
-}
-*/
-
+/// @brief https://onnx.ai/onnx/operators/onnx__Gather.html
 template<int Axis=0>
-auto gather(AnyTensor auto t, AnyTensor auto indices) {
-    using NewDims = decltype(constexpr_for<Axis + 1, t.Rank>([&]<int I>(auto dims){
-        return typename decltype(dims):: template Append<t.Dim(I)>();
-    }, typename TYPE(indices)::Dims()));
-    Tensor<typename TYPE(t)::ValueType, typename TYPE(t)::AllocatorType, NewDims> result;
+auto gather(const AnyTensor auto& input, const AnyTensor auto& indices) {
+    if constexpr (TYPE(indices)::IsScalar) {
+        return input.template index<Axis>(indices);
+    } else {
+        using NewDims = decltype(constexpr_for<Axis + 1, input.Rank>([&]<int I>(auto dims){
+            return typename decltype(dims):: template Append<input.Dim(I)>();
+        }, typename TYPE(indices)::Dims()));
 
-    EltwiseVariadicNDNode([]__multi__(auto idx, auto result, auto indices, auto t) {
-
-    }, result, indices, t);
-    return result;
-}
-
-
-template<int Axis=0>
-constexpr auto gather(const AnyTensor auto& input, int64_t index) {
-    return input.template index<Axis>(index);
+        return EltwiseVariadicNDNode<NewDims>([]__multi__(auto idx, auto input, auto indices) {
+            auto new_index = constexpr_for<0, indices.Rank>([&]<int64_t I> (auto indices){
+                return indices(idx[I]);
+            }, indices);
+            idx[indices.Rank] = new_index;
+            return input(idx);
+        }, input, indices);
+    }
 }
 
 
 template<int Axis = 0, AnyTensor T, AnyTensor... Ts> requires(SameRank<T, Ts...> && Axis < T::Rank &&
     ((typename T::Dims::template Set<Axis, 0>() == typename Ts::Dims::template Set<Axis, 0>()) && ...))
 auto concat(const T& input0, const Ts&... inputs) {
-    constexpr auto NewSize = Sequence<T::Dim(Axis), Ts::Dim(Axis)...>::Sum();
-    Tensor<typename T::ValueType, typename T::AllocatorType, typename T::Dims::template Set<Axis, NewSize>> result;
+    constexpr auto NewSize = T::Dim(Axis) + (Ts::Dim(Axis) + ...);
 
-    EltwiseVariadicNDNode([]__multi__(auto&& indices, auto&& result, auto&&... inputs) {
-        auto& r = result(indices);
+    return EltwiseVariadicNDNode<typename T::Dims::template Set<Axis, NewSize>>([]__multi__(auto indices, auto&&... inputs) {
         auto axis_index = indices[Axis];
 
+        typename T::ValueType result;
+
         constexpr_for<0, sizeof...(inputs)>([&]<int I>(int64_t accumulator) {
-            constexpr auto Dim = TYPE(std::get<I>(inputs...))::Dim(Axis);
+            constexpr auto Dim = TYPE(inputs...[I])::Dim(Axis);
 
             if (axis_index >= accumulator && accumulator + Dim > axis_index) {
                 indices[Axis] = axis_index - accumulator;
-                r = std::get<I>(inputs...)(indices);
+                result = inputs...[I](indices);
             }
             return accumulator + Dim;
         }, 0);
-    }, result, input0, inputs...);
-    return result;
+
+        return result;
+    }, input0, inputs...);
 }
 
 
@@ -311,9 +296,12 @@ void randn(T& t, const float& mean = 0, const float& stddev = 1) {
     }
 }
 
-template<AnyTensor T>
-void iota(T& t, int start = 0) {
-    InplaceNode(t, [start, view = t.data.view] __multi__ (const auto& x) { return int(&x - view) + start; });
+template<AnySequence Shape, Memory device>
+decltype(auto) index_to_value(auto&& f) {
+    Tensor<decltype(f(0)), Allocator<device>, Shape> result;
+    return make_node<Sequence<Shape::Product()>>([f](auto indices, auto& result) {
+        result[indices[0]] = f(indices[0]);
+    }, result);
 }
 
 };

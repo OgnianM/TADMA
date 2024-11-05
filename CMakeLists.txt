@@ -1,10 +1,16 @@
 cmake_minimum_required(VERSION 3.25)
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 26)
 
 #set(CMAKE_CUDA_HOST_COMPILER /usr/bin/clang-14)
 
+
 project(TADMA CXX CUDA)
+
+
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -ftemplate-depth=100000")
+
+set(CLANG_DEFAULT_CXX_STDLIB "libc++")
 
 option(INDEX_ONLY "Only build index" OFF)
 
@@ -20,13 +26,17 @@ add_executable(TADMA main.cu
         include/tadma/Operations.hpp
         include/tadma/Globals.hpp
         include/tadma/Defines.hpp
-        include/tadma/Types.hpp
-        include/tadma/Python.hpp
+        include/tadma/kernels/Reduce.hpp
+        include/tadma/Concepts.hpp
+        include/tadma/Node.hpp
+        include/tadma/Utils.hpp
+        include/tadma/Tagging.hpp
+        include/tadma/ExecutionTape.hpp
 )
 
 set_target_properties(TADMA PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
-        CUDA_STANDARD 23
+        CUDA_STANDARD 26
 )
 
 
@@ -35,6 +45,8 @@ target_link_libraries(TADMA
         cublasLt
         curand
         )
+
+target_include_directories(TADMA PRIVATE include)
 
 else ()
         message("Index only")
@@ -53,15 +65,30 @@ add_executable(index
         include/tadma/Globals.hpp
         include/tadma/Defines.hpp
         main.cpp
-        include/tadma/Types.hpp
-        include/tadma/Python.hpp)
+        include/tadma/kernels/Reduce.hpp
+        include/tadma/Concepts.hpp
+        include/tadma/Node.hpp
+        include/tadma/Utils.hpp
+        include/tadma/Tagging.hpp
+        include/tadma/ExecutionTape.hpp)
+
+target_include_directories(index PRIVATE include)
 
 set_target_properties(index PROPERTIES
-        CXX_STANDARD 23
+        CXX_STANDARD 26
 )
 
+target_link_libraries(index cublasLt cudart)
 
-add_executable(generated scripts/generated.cu)
+
+add_executable(generated scripts/generated.cu
+        include/tadma/kernels/Reduce.hpp
+        include/tadma/kernels/EltwiseVariadicND.hpp
+        include/tadma/Concepts.hpp
+        include/tadma/Node.hpp
+        include/tadma/Utils.hpp
+        include/tadma/Tagging.hpp
+        include/tadma/ExecutionTape.hpp)
 
 target_include_directories(generated PRIVATE include)
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "Defines.hpp"
 #include <cuda_runtime.h>
 #include <cublasLt.h>
 
@@ -34,4 +35,11 @@ struct CUDAStreamGuard {
         stream = oldStream;
     }
 };
+
+
+struct CUDAState {
+    cudaStream_t stream;
+    cublasLtHandle_t cublasLtHandle;
+};
+
 };

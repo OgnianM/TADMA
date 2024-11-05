@@ -1,9 +1,9 @@
 #pragma once
 #include "Storage.hpp"
 #include "Globals.hpp"
+#include "Concepts.hpp"
 
 namespace tadma {
-enum Memory { kCPU, kCUDA, kConstexpr, kLocal };
 
 template<Memory device> struct Allocator;
 
@@ -36,27 +36,19 @@ template<> struct Allocator<kCPU> : DeviceBound<kCPU>{
     }
 };
 
-template<typename Sequence_>
-struct ConstexprAllocator : DeviceBound<kConstexpr> {
-    using Sequence = Sequence_;
-
-    template<typename T, int64_t Count> requires(Count < Sequence::Size)
-    static constexpr auto allocate() {
-        return typename ConstexprStorage<Sequence>::OffsetableConstexprStorage();
-    }
-
-    template<typename T, int64_t Count> requires(Count == Sequence::Size)
-    static constexpr auto allocate() {
-        return ConstexprStorage<Sequence>();
+template<> struct Allocator<kTrampoline> : DeviceBound<kTrampoline> {
+    template<typename T, int64_t Count>
+    static TrampolineStorage<T> allocate() {
+        return {};
     }
 };
 
 
-template<typename T> concept AnyAllocator = true;
-template<typename T> concept AnyCudaTensor = AnyTensor<T> && (std::decay_t<T>::device == Memory::kCUDA);
-template<typename T> concept AnyHostTensor = AnyTensor<T> && (std::decay_t<T>::device == Memory::kCPU);
-template<typename T> concept AnyConstexprTensor = AnyTensor<T> && (std::decay_t<T>::device == Memory::kConstexpr);
+
 template<typename T, AnyAllocator Allocator, AnySequence Dims_, AnySequence StridesInit> struct Tensor;
+
+template<AnyAllocator Allocator, AnyAllocator... Allocators> requires ((Allocator::device == Allocators::device) && ...)
+using CommonAllocator = Allocator;
 
 };
 

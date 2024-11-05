@@ -97,7 +97,7 @@ def generate_members(model):
             val = raw_data_to_typed_array(initializer.raw_data, type)
             values_by_name[initializer.name] = val
 
-            member_list.append(f'    static constexpr {type} {process_name(initializer.name)} = {val[0]};\n')
+            member_list.append(f'    static constexpr ConstexprHolder<{val[0]}> {process_name(initializer.name)};\n')
 
         else:
 
@@ -120,8 +120,8 @@ def generate_members(model):
             arr = constant_node_to_array(node)
 
             if len(arr) == 1:
-                init = arr[0]
-                type = 'static constexpr auto'
+                init = '{}'
+                type = f'static constexpr ConstexprHolder<{arr[0]}>'
             else:
                 #dtype = onnx_type_to_cpp_typestr(node.attribute[0].t.data_type)
                 #type = f'Tensor<{dtype}, ALLOCATOR, Sequence<{list_to_string(node.attribute[0].t.dims)}>>'
@@ -260,7 +260,7 @@ def generate_inference_function(model : onnxparse.ParsedModel):
             init = f'{process_name(node.input[0])}.template squeeze<>()'
 
         elif node.op_type == 'Unsqueeze':
-            init = f'unsqueeze<{process_name(node.input[1])}>({process_name(node.input[0])})'
+            init = f'{process_name(node.input[0])}.template unsqueeze<{process_name(node.input[1])}>()'
 
         elif node.op_type == 'Split':
             init = f'{process_name(node.input[0])}.template split<{node.attribute[0].i}>()'
